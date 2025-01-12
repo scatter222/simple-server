@@ -1,0 +1,25 @@
+{
+  "msbuild": {
+    "excludeFolders": ["**/bin/**", "**/obj/**", "**/node_modules/**"]
+  },
+  "RoslynExtensionsOptions": {
+    "enableAnalyzersSupport": false,
+    "locationPaths": []
+  },
+  "FormattingOptions": {
+    "enableEditorConfigSupport": true,
+    "enableMsBuildEditorConfigSupport": true
+  },
+  "fileOptions": {
+    "systemExcludeSearchPatterns": [
+      "**/bin/**",
+      "**/obj/**",
+      "**/node_modules/**"
+    ],
+    "excludeSearchPaths": ["**/bin/**", "**/obj/**", "**/node_modules/**"]
+  },
+  "enableDecompilationSupport": false,
+  "enableImportCompletion": false,
+  "enableMsBuildLoadProjectsOnDemand": true,
+  "projectLoadTimeout": 60
+}
