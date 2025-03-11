@@ -46,35 +46,6 @@ is_vm() {
     return 1
 }
 
-# Print VM environment warning
-if is_vm; then
-    echo -e "\n\033[1;33m==>\033[0m \033[1mVM Environment Detected\033[0m"
-    echo -e "This script has been modified to work better in a VM environment."
-    echo -e "Some features like compositing have been disabled for better performance."
-    echo -e "RDP-specific optimizations have been applied."
-fi
-
-# Update system packages
-section "Updating system packages"
-run "sudo dnf update -y"
-
-# Install essential repositories
-section "Setting up additional repositories"
-run "sudo dnf install -y epel-release"
-run "sudo dnf config-manager --set-enabled ol8_developer_EPEL"
-run "sudo dnf config-manager --set-enabled ol8_codeready_builder"
-
-# Install development tools
-section "Installing development tools"
-run "sudo dnf groupinstall -y 'Development Tools'"
-run "sudo dnf install -y git curl wget vim neovim nodejs npm python3 python3-pip"
-
-# Install Docker
-section "Installing Docker"
-run "sudo dnf config-manager --add-repo=https://download.docker.com/linux/centos/docker-ce.repo"
-run "sudo dnf install -y docker-ce docker-ce-cli containerd.io"
-run "sudo systemctl enable --now docker"
-run "sudo usermod -aG docker $USER"
 
 # Install a better terminal (using xterm instead of GPU-accelerated Alacritty for VM compatibility)
 section "Installing an enhanced terminal"
@@ -188,47 +159,6 @@ run "fc-cache -fv"
 # Install productivity tools
 section "Installing productivity tools"
 run "sudo dnf install -y fzf ripgrep fd-find bat"
-
-# Install and configure Neovim
-section "Setting up Neovim editor"
-mkdir -p ~/.config/nvim
-cat > ~/.config/nvim/init.vim << 'EOL'
-" Basic settings
-set number
-set relativenumber
-set autoindent
-set tabstop=4
-set shiftwidth=4
-set smarttab
-set softtabstop=4
-set mouse=a
-set clipboard+=unnamedplus
-
-" Install vim-plug for plugins
-if empty(glob('~/.local/share/nvim/site/autoload/plug.vim'))
-  silent !curl -fLo ~/.local/share/nvim/site/autoload/plug.vim --create-dirs
-    \ https://raw.githubusercontent.com/junegunn/vim-plug/master/plug.vim
-  autocmd VimEnter * PlugInstall --sync | source $MYVIMRC
-endif
-
-" Plugins
-call plug#begin('~/.vim/plugged')
-Plug 'neoclide/coc.nvim', {'branch': 'release'}
-Plug 'junegunn/fzf', { 'do': { -> fzf#install() } }
-Plug 'junegunn/fzf.vim'
-Plug 'morhetz/gruvbox'
-Plug 'vim-airline/vim-airline'
-Plug 'preservim/nerdtree'
-call plug#end()
-
-" Theme settings
-colorscheme gruvbox
-set background=dark
-
-" Key mappings
-nnoremap <C-n> :NERDTreeToggle<CR>
-nnoremap <C-p> :Files<CR>
-EOL
 
 # Configure i3
 section "Configuring i3 window manager"
