@@ -28,24 +28,6 @@ run() {
     fi
 }
 
-# Function to detect if running in a VM
-is_vm() {
-    if [ -f /sys/class/dmi/id/product_name ]; then
-        product_name=$(cat /sys/class/dmi/id/product_name)
-        if [[ $product_name == *"VMware"* ]] || [[ $product_name == *"Virtual"* ]] || [[ $product_name == *"HVM"* ]]; then
-            return 0
-        fi
-    fi
-    
-    if [ -f /proc/cpuinfo ]; then
-        if grep -q "hypervisor" /proc/cpuinfo; then
-            return 0
-        fi
-    fi
-    
-    return 1
-}
-
 
 # Install a better terminal (using xterm instead of GPU-accelerated Alacritty for VM compatibility)
 section "Installing an enhanced terminal"
