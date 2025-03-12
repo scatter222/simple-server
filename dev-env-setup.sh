@@ -28,6 +28,64 @@ run() {
     fi
 }
 
+# Function to check if a package is available in repositories
+is_package_available() {
+    if dnf list available "$1" &> /dev/null; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Function to detect available window managers/desktop environments
+detect_available_wm() {
+    echo "Checking for available window managers..."
+    
+    if is_package_available "i3"; then
+        echo "i3 window manager is available."
+        WM_TYPE="i3"
+    elif is_package_available "openbox"; then
+        echo "Openbox window manager is available."
+        WM_TYPE="openbox"
+    elif is_package_available "fluxbox"; then
+        echo "Fluxbox window manager is available."
+        WM_TYPE="fluxbox"
+    elif is_package_available "xfce4-session"; then
+        echo "XFCE desktop environment is available."
+        WM_TYPE="xfce"
+    elif is_package_available "mate-session-manager"; then
+        echo "MATE desktop environment is available."
+        WM_TYPE="mate"
+    else
+        echo "No alternative window manager found. Using system default."
+        WM_TYPE="default"
+    fi
+}
+
+# Detect available window managers
+detect_available_wm
+
+# Update system packages
+section "Updating system packages"
+run "sudo dnf update -y"
+
+# Install essential repositories
+section "Setting up additional repositories"
+run "sudo dnf install -y epel-release"
+run "sudo dnf config-manager --set-enabled ol8_developer_EPEL"
+run "sudo dnf config-manager --set-enabled ol8_codeready_builder"
+
+# Install development tools
+section "Installing development tools"
+run "sudo dnf groupinstall -y 'Development Tools'"
+run "sudo dnf install -y git curl wget vim neovim nodejs npm python3 python3-pip"
+
+# Install Docker
+section "Installing Docker"
+run "sudo dnf config-manager --add-repo=https://download.docker.com/linux/centos/docker-ce.repo"
+run "sudo dnf install -y docker-ce docker-ce-cli containerd.io"
+run "sudo systemctl enable --now docker"
+run "sudo usermod -aG docker $USER"
 
 # Install a better terminal (using xterm instead of GPU-accelerated Alacritty for VM compatibility)
 section "Installing an enhanced terminal"
@@ -77,9 +135,29 @@ set -g status-bg black
 set -g status-fg white
 EOL
 
-# Install i3 window manager
-section "Installing i3 tiling window manager"
-run "sudo dnf install -y i3 i3status i3lock dmenu"
+# Install window manager based on availability
+section "Installing window manager"
+
+case $WM_TYPE in
+    "i3")
+        run "sudo dnf install -y i3 i3status dmenu"
+        ;;
+    "openbox")
+        run "sudo dnf install -y openbox obconf menu tint2"
+        ;;
+    "fluxbox")
+        run "sudo dnf install -y fluxbox"
+        ;;
+    "xfce")
+        run "sudo dnf install -y @xfce-desktop-environment"
+        ;;
+    "mate")
+        run "sudo dnf install -y @mate-desktop-environment"
+        ;;
+    "default")
+        echo "Skipping window manager installation, using system default."
+        ;;
+esac
 
 # Using built-in i3status instead of polybar for VM compatibility
 section "Configuring i3status for VM environment"
@@ -141,6 +219,47 @@ run "fc-cache -fv"
 # Install productivity tools
 section "Installing productivity tools"
 run "sudo dnf install -y fzf ripgrep fd-find bat"
+
+# Install and configure Neovim
+section "Setting up Neovim editor"
+mkdir -p ~/.config/nvim
+cat > ~/.config/nvim/init.vim << 'EOL'
+" Basic settings
+set number
+set relativenumber
+set autoindent
+set tabstop=4
+set shiftwidth=4
+set smarttab
+set softtabstop=4
+set mouse=a
+set clipboard+=unnamedplus
+
+" Install vim-plug for plugins
+if empty(glob('~/.local/share/nvim/site/autoload/plug.vim'))
+  silent !curl -fLo ~/.local/share/nvim/site/autoload/plug.vim --create-dirs
+    \ https://raw.githubusercontent.com/junegunn/vim-plug/master/plug.vim
+  autocmd VimEnter * PlugInstall --sync | source $MYVIMRC
+endif
+
+" Plugins
+call plug#begin('~/.vim/plugged')
+Plug 'neoclide/coc.nvim', {'branch': 'release'}
+Plug 'junegunn/fzf', { 'do': { -> fzf#install() } }
+Plug 'junegunn/fzf.vim'
+Plug 'morhetz/gruvbox'
+Plug 'vim-airline/vim-airline'
+Plug 'preservim/nerdtree'
+call plug#end()
+
+" Theme settings
+colorscheme gruvbox
+set background=dark
+
+" Key mappings
+nnoremap <C-n> :NERDTreeToggle<CR>
+nnoremap <C-p> :Files<CR>
+EOL
 
 # Configure i3
 section "Configuring i3 window manager"
@@ -1013,55 +1132,55 @@ cat > ~/.gitconfig << 'EOL'
     pl = pull
 EOL
 
-# # Configure VSCode
-# section "Configuring VS Code"
-# mkdir -p ~/.config/Code/User
-# cat > ~/.config/Code/User/settings.json << 'EOL'
-# {
-#     "editor.fontFamily": "'FiraCode Nerd Font', 'Droid Sans Mono', 'monospace'",
-#     "editor.fontLigatures": true,
-#     "editor.fontSize": 14,
-#     "editor.lineHeight": 24,
-#     "editor.rulers": [80, 120],
-#     "editor.minimap.enabled": true,
-#     "editor.renderWhitespace": "boundary",
-#     "editor.cursorBlinking": "phase",
-#     "editor.cursorSmoothCaretAnimation": true,
-#     "editor.formatOnSave": true,
-#     "editor.suggestSelection": "first",
-#     "editor.snippetSuggestions": "top",
-#     "files.autoSave": "afterDelay",
-#     "files.trimTrailingWhitespace": true,
-#     "files.insertFinalNewline": true,
-#     "terminal.integrated.fontFamily": "'FiraCode Nerd Font', monospace",
-#     "terminal.integrated.fontSize": 14,
-#     "workbench.colorTheme": "Dracula",
-#     "workbench.iconTheme": "material-icon-theme",
-#     "workbench.startupEditor": "newUntitledFile",
-#     "window.zoomLevel": 0,
-#     "window.titleBarStyle": "custom",
-#     "telemetry.telemetryLevel": "off",
-#     "extensions.ignoreRecommendations": false,
-#     "breadcrumbs.enabled": true,
-#     "git.autofetch": true,
-#     "explorer.confirmDelete": false,
-#     "diffEditor.ignoreTrimWhitespace": false
-# }
-# EOL
+# Configure VSCode
+section "Configuring VS Code"
+mkdir -p ~/.config/Code/User
+cat > ~/.config/Code/User/settings.json << 'EOL'
+{
+    "editor.fontFamily": "'FiraCode Nerd Font', 'Droid Sans Mono', 'monospace'",
+    "editor.fontLigatures": true,
+    "editor.fontSize": 14,
+    "editor.lineHeight": 24,
+    "editor.rulers": [80, 120],
+    "editor.minimap.enabled": true,
+    "editor.renderWhitespace": "boundary",
+    "editor.cursorBlinking": "phase",
+    "editor.cursorSmoothCaretAnimation": true,
+    "editor.formatOnSave": true,
+    "editor.suggestSelection": "first",
+    "editor.snippetSuggestions": "top",
+    "files.autoSave": "afterDelay",
+    "files.trimTrailingWhitespace": true,
+    "files.insertFinalNewline": true,
+    "terminal.integrated.fontFamily": "'FiraCode Nerd Font', monospace",
+    "terminal.integrated.fontSize": 14,
+    "workbench.colorTheme": "Dracula",
+    "workbench.iconTheme": "material-icon-theme",
+    "workbench.startupEditor": "newUntitledFile",
+    "window.zoomLevel": 0,
+    "window.titleBarStyle": "custom",
+    "telemetry.telemetryLevel": "off",
+    "extensions.ignoreRecommendations": false,
+    "breadcrumbs.enabled": true,
+    "git.autofetch": true,
+    "explorer.confirmDelete": false,
+    "diffEditor.ignoreTrimWhitespace": false
+}
+EOL
 
-# # Install recommended VS Code extensions
-# section "Installing recommended VS Code extensions"
-# run "code --install-extension dracula-theme.theme-dracula"
-# run "code --install-extension pkief.material-icon-theme"
-# run "code --install-extension ms-python.python"
-# run "code --install-extension esbenp.prettier-vscode"
-# run "code --install-extension dbaeumer.vscode-eslint"
-# run "code --install-extension eamodio.gitlens"
-# run "code --install-extension ms-azuretools.vscode-docker"
-# run "code --install-extension ritwickdey.liveserver"
-# run "code --install-extension yzhang.markdown-all-in-one"
-# run "code --install-extension editorconfig.editorconfig"
-# run "code --install-extension visualstudioexptteam.vscodeintellicode"
+# Install recommended VS Code extensions
+section "Installing recommended VS Code extensions"
+run "code --install-extension dracula-theme.theme-dracula"
+run "code --install-extension pkief.material-icon-theme"
+run "code --install-extension ms-python.python"
+run "code --install-extension esbenp.prettier-vscode"
+run "code --install-extension dbaeumer.vscode-eslint"
+run "code --install-extension eamodio.gitlens"
+run "code --install-extension ms-azuretools.vscode-docker"
+run "code --install-extension ritwickdey.liveserver"
+run "code --install-extension yzhang.markdown-all-in-one"
+run "code --install-extension editorconfig.editorconfig"
+run "code --install-extension visualstudioexptteam.vscodeintellicode"
 
 # Install common programming language support
 section "Installing common programming language support"
@@ -1071,53 +1190,61 @@ run "sudo dnf install -y python3-devel"
 # Add RDP-specific configuration
 section "Adding RDP-specific configurations"
 
-# Create .xsessionrc file for RDP sessions
-cat > ~/.xsessionrc << 'EOL'
-#!/bin/bash
+# Create desktop entries for supported window managers
+mkdir -p ~/.local/share/applications ~/.local/share/xsessions
 
-# Load Xresources
-if [ -f ~/.Xresources ]; then
-    xrdb -merge ~/.Xresources
-fi
-
-# Fix RDP issues
-xset -dpms
-xset s off
-
-# Set a reasonable DPI for RDP
-xrandr --dpi 96
-
-# Load i3 as the window manager when using RDP
-if [ -z "$DESKTOP_SESSION" ]; then
-    exec i3
-fi
-EOL
-chmod +x ~/.xsessionrc
-
-# Create ~/.xinitrc
-cat > ~/.xinitrc << 'EOL'
-#!/bin/bash
-
-# Load Xresources
-if [ -f ~/.Xresources ]; then
-    xrdb -merge ~/.Xresources
-fi
-
-# Start i3 window manager
-exec i3
-EOL
-chmod +x ~/.xinitrc
-
-# Add xsession desktop entry for i3
-mkdir -p ~/.local/share/xsessions
-cat > ~/.local/share/xsessions/i3-rdp.desktop << 'EOL'
+# Create desktop entry for xterm with better colors
+cat > ~/.local/share/applications/xterm-custom.desktop << 'EOL'
 [Desktop Entry]
-Name=i3 (RDP Compatible)
-Comment=Improved dynamic tiling window manager
-Exec=i3
+Name=XTerm (Custom)
+Comment=Terminal with Dracula theme
+Exec=xterm -fa "FiraCode Nerd Font" -fs 11 -bg "#282a36" -fg "#f8f8f2" -xrm "XTerm*selectToClipboard: true"
+Icon=utilities-terminal
 Type=Application
-Keywords=tiling;wm;windowmanager;window;manager;
+Categories=System;TerminalEmulator;
+StartupNotify=true
+Keywords=shell;prompt;command;commandline;
 EOL
+
+# Create xsession entry for our custom environment
+case "$WM_TYPE" in
+    "i3")
+        cat > ~/.local/share/xsessions/custom-dev-env.desktop << 'EOL'
+[Desktop Entry]
+Name=Development Environment (i3)
+Comment=Custom development environment with i3
+Exec=~/.xinitrc
+Type=Application
+EOL
+        ;;
+    "openbox")
+        cat > ~/.local/share/xsessions/custom-dev-env.desktop << 'EOL'
+[Desktop Entry]
+Name=Development Environment (Openbox)
+Comment=Custom development environment with Openbox
+Exec=~/.xinitrc
+Type=Application
+EOL
+        ;;
+    "fluxbox")
+        cat > ~/.local/share/xsessions/custom-dev-env.desktop << 'EOL'
+[Desktop Entry]
+Name=Development Environment (Fluxbox)
+Comment=Custom development environment with Fluxbox
+Exec=~/.xinitrc
+Type=Application
+EOL
+        ;;
+    *)
+        cat > ~/.local/share/xsessions/custom-dev-env.desktop << 'EOL'
+[Desktop Entry]
+Name=Development Environment
+Comment=Custom development environment
+Exec=~/.xinitrc
+Type=Application
+EOL
+        ;;
+esac
 
 # Display final message
 section "Setup Complete!"
