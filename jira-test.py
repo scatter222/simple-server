@@ -1,50 +1,48 @@
 import requests
 import json
 import logging
-from jira import JIRA
+import base64
+import re
+import time
+from urllib.parse import parse_qs, urlparse
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-class ZephyrSquadManager:
+class ZephyrWithSessionAuth:
     """
-    A class to manage Zephyr Squad test cases using the JIRA Python client
-    for authentication and session management
+    Zephyr API client that uses browser-like session authentication to avoid CAPTCHA
     """
-
-    def __init__(self, jira_url, email, token, verify_ssl=False):
+    
+    def __init__(self, jira_url, username, password, verify_ssl=False):
         """
         Initialize with Jira credentials
         
         Args:
-            jira_url (str): Your Jira instance URL
-            email (str): Your Jira email
-            token (str): Your Jira Personal Access Token
-            verify_ssl (bool): Whether to verify SSL certificates (default: False)
+            jira_url (str): Jira instance URL
+            username (str): Jira username/email
+            password (str): Jira password or token
+            verify_ssl (bool): Whether to verify SSL certificates
         """
         self.jira_url = jira_url.rstrip('/')
+        self.username = username
+        self.password = password
         self.verify_ssl = verify_ssl
+        self.session = requests.Session()
         
-        # Disable SSL warnings if we're not verifying
+        # Disable SSL warnings if verification is disabled
         if not verify_ssl:
             import urllib3
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-            logger.warning("SSL certificate verification is disabled. This is insecure!")
         
-        # Initialize Jira client
-        logger.info("Connecting to Jira...")
-        self.jira = JIRA(
-            server=jira_url,
-            basic_auth=(email, token),
-            options={'verify': verify_ssl}
-        )
-        logger.info("Successfully connected to Jira")
+        # Set user agent to mimic a browser
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5'
+        })
         
-        # Store the authentication data from the Jira client
-        self.session = self.jira._session
-        self.auth_header = self.session.headers.get('Authorization')
-        
-        # Zephyr test status IDs
+        # Status IDs for Zephyr
         self.STATUS = {
             "PASS": 1,
             "FAIL": 2,
@@ -53,177 +51,152 @@ class ZephyrSquadManager:
             "UNEXECUTED": -1
         }
     
-    def _make_request(self, method, endpoint, params=None, data=None):
+    def login(self):
         """
-        Make a request to the Zephyr API using the authenticated Jira session
+        Log in to Jira using a browser-like session approach
         
-        Args:
-            method (str): HTTP method (GET, POST, PUT)
-            endpoint (str): API endpoint
-            params (dict, optional): Query parameters
-            data (dict, optional): Request body
-            
         Returns:
-            dict: JSON response or error information
+            bool: True if login was successful, False otherwise
         """
-        url = f"{self.jira_url}{endpoint}"
-        
-        # Ensure we have the right content-type
-        headers = {
-            'Content-Type': 'application/json',
-            'Accept': 'application/json'
-        }
+        # Step 1: Visit the login page to get any necessary cookies
+        login_url = f"{self.jira_url}/login.jsp"
+        logger.info(f"Visiting login page: {login_url}")
         
         try:
-            if method.upper() == 'GET':
-                response = self.session.get(url, params=params, headers=headers, verify=self.verify_ssl)
-            elif method.upper() == 'POST':
-                response = self.session.post(url, params=params, data=json.dumps(data) if data else None, headers=headers, verify=self.verify_ssl)
-            elif method.upper() == 'PUT':
-                response = self.session.put(url, params=params, data=json.dumps(data) if data else None, headers=headers, verify=self.verify_ssl)
+            response = self.session.get(login_url, verify=self.verify_ssl)
+            
+            if response.status_code != 200:
+                logger.error(f"Failed to access login page: {response.status_code}")
+                return False
+                
+            # Step 2: Submit login credentials
+            auth_url = f"{self.jira_url}/rest/auth/1/session"
+            payload = {
+                "username": self.username,
+                "password": self.password
+            }
+            
+            logger.info("Submitting login credentials")
+            response = self.session.post(
+                auth_url,
+                json=payload,
+                verify=self.verify_ssl,
+                headers={
+                    'Content-Type': 'application/json',
+                    'X-Requested-With': 'XMLHttpRequest'  # Important for some instances
+                }
+            )
+            
+            if response.status_code == 200:
+                logger.info("Login successful!")
+                
+                # Store any session cookies or tokens returned
+                self.session.headers.update({
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json'
+                })
+                
+                # Check if we can access a protected resource
+                myself = self.session.get(
+                    f"{self.jira_url}/rest/api/2/myself",
+                    verify=self.verify_ssl
+                )
+                
+                if myself.status_code == 200:
+                    user_data = myself.json()
+                    logger.info(f"Authenticated as: {user_data.get('displayName', user_data.get('name', 'Unknown'))}")
+                    return True
+                else:
+                    logger.warning("Login appeared successful but user info couldn't be retrieved")
+                    return False
             else:
-                raise ValueError(f"Unsupported method: {method}")
-            
-            logger.info(f"Request: {method} {url}")
-            logger.info(f"Status code: {response.status_code}")
-            
-            if response.status_code >= 400:
-                logger.error(f"Error response: {response.text}")
-                return {
-                    "error": True,
-                    "status_code": response.status_code,
-                    "message": response.text
-                }
-            
-            try:
-                return response.json()
-            except ValueError:
-                if not response.text:
-                    return {"success": True}
-                return {"raw_response": response.text}
+                logger.error(f"Login failed: {response.status_code} - {response.text}")
                 
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Request failed: {str(e)}")
-            return {"error": True, "message": str(e)}
-    
-    def test_connectivity(self):
-        """
-        Test connectivity to various Zephyr endpoints
-        
-        Returns:
-            dict: Results of endpoint tests
-        """
-        endpoints = [
-            # Basic Jira endpoint
-            "/rest/api/2/myself",
-            # Zephyr Squad endpoints
-            "/rest/zapi/latest/cycle",
-            "/rest/zapi/latest/execution",
-            # Alternative endpoints
-            "/rest/zephyr/latest/cycle",
-            "/rest/zephyr/1.0/cycle",
-            # Classic Zephyr endpoints (for older installations)
-            "/rest/api/2/issue/createmeta?projectIds=10000&issuetypeNames=Test&expand=projects.issuetypes.fields"
-        ]
-        
-        results = {}
-        for endpoint in endpoints:
-            logger.info(f"Testing endpoint: {endpoint}")
-            try:
-                response = self.session.get(f"{self.jira_url}{endpoint}", verify=self.verify_ssl)
-                results[endpoint] = {
-                    "status_code": response.status_code,
-                    "accessible": response.status_code < 400
-                }
-                logger.info(f"Endpoint {endpoint}: Status code {response.status_code}")
-            except Exception as e:
-                results[endpoint] = {
-                    "error": str(e),
-                    "accessible": False
-                }
-                logger.error(f"Error testing {endpoint}: {str(e)}")
+                # Check for CAPTCHA challenge
+                if "CAPTCHA_CHALLENGE" in response.text:
+                    logger.error("CAPTCHA challenge detected. Cannot proceed with automation.")
+                    logger.error("Try logging in via browser first, then use those cookies.")
+                    
+                return False
                 
-        return results
+        except Exception as e:
+            logger.error(f"Login failed: {str(e)}")
+            return False
     
-    def get_test_cycles(self, project_id=None, project_key=None):
+    def get_cycles(self, project_id):
         """
-        Get all test cycles for a project
+        Get test cycles for a project
         
         Args:
-            project_id (str, optional): Numeric project ID
-            project_key (str, optional): Project key (e.g., "TEST")
+            project_id (str): Project ID
             
         Returns:
             dict: JSON response with cycles
         """
-        if not project_id and project_key:
-            # Get project ID from key
-            project = self.jira.project(project_key)
-            project_id = project.id
+        url = f"{self.jira_url}/rest/zapi/latest/cycle"
+        params = {"projectId": project_id}
+        
+        try:
+            response = self.session.get(url, params=params, verify=self.verify_ssl)
             
-        return self._make_request("GET", "/rest/zapi/latest/cycle", params={"projectId": project_id})
+            if response.status_code == 200:
+                return response.json()
+            else:
+                logger.error(f"Failed to get cycles: {response.status_code} - {response.text}")
+                return {"error": True, "message": response.text}
+                
+        except Exception as e:
+            logger.error(f"Error getting cycles: {str(e)}")
+            return {"error": True, "message": str(e)}
     
-    def get_executions_for_cycle(self, cycle_id, project_id):
+    def get_executions(self, cycle_id, project_id):
         """
-        Get all test executions for a test cycle
+        Get executions for a test cycle
         
         Args:
-            cycle_id (str): The cycle ID
-            project_id (str): The project ID
+            cycle_id (str): Cycle ID
+            project_id (str): Project ID
             
         Returns:
             dict: JSON response with executions
         """
-        return self._make_request(
-            "GET", 
-            "/rest/zapi/latest/execution", 
-            params={"cycleId": cycle_id, "projectId": project_id}
-        )
-    
-    def get_execution_for_test(self, test_key, cycle_id, project_id):
-        """
-        Find execution for a specific test in a cycle
+        url = f"{self.jira_url}/rest/zapi/latest/execution"
+        params = {
+            "cycleId": cycle_id,
+            "projectId": project_id
+        }
         
-        Args:
-            test_key (str): Test issue key (e.g., "TEST-123")
-            cycle_id (str): The cycle ID
-            project_id (str): The project ID
+        try:
+            response = self.session.get(url, params=params, verify=self.verify_ssl)
             
-        Returns:
-            dict: Execution data or None if not found
-        """
-        executions = self.get_executions_for_cycle(cycle_id, project_id)
-        
-        if "executions" not in executions:
-            logger.error(f"No executions found or unexpected response format: {executions}")
-            return None
-        
-        for execution_id, execution in executions["executions"].items():
-            if execution.get("issueKey") == test_key:
-                return {
-                    "id": execution_id,
-                    "data": execution
-                }
-        
-        logger.warning(f"No execution found for test {test_key}")
-        return None
+            if response.status_code == 200:
+                return response.json()
+            else:
+                logger.error(f"Failed to get executions: {response.status_code} - {response.text}")
+                return {"error": True, "message": response.text}
+                
+        except Exception as e:
+            logger.error(f"Error getting executions: {str(e)}")
+            return {"error": True, "message": str(e)}
     
-    def update_test_status(self, execution_id, status, comment=None):
+    def update_execution(self, execution_id, status, comment=None):
         """
         Update the status of a test execution
         
         Args:
-            execution_id (str): The execution ID
+            execution_id (str): Execution ID
             status (str): Status name (PASS, FAIL, etc.)
             comment (str, optional): Comment to add
             
         Returns:
-            dict: Response data
+            dict: JSON response
         """
+        url = f"{self.jira_url}/rest/zapi/latest/execution/{execution_id}/execute"
+        
         status_id = self.STATUS.get(status.upper())
         if not status_id:
-            raise ValueError(f"Invalid status: {status}. Must be one of {list(self.STATUS.keys())}")
-        
+            return {"error": True, "message": f"Invalid status: {status}"}
+            
         payload = {
             "status": status_id
         }
@@ -231,99 +204,221 @@ class ZephyrSquadManager:
         if comment:
             payload["comment"] = comment
             
-        return self._make_request(
-            "PUT",
-            f"/rest/zapi/latest/execution/{execution_id}/execute",
-            data=payload
-        )
+        try:
+            response = self.session.put(
+                url,
+                json=payload,
+                verify=self.verify_ssl
+            )
+            
+            if response.status_code in [200, 201]:
+                return response.json()
+            else:
+                logger.error(f"Failed to update execution: {response.status_code} - {response.text}")
+                return {"error": True, "message": response.text}
+                
+        except Exception as e:
+            logger.error(f"Error updating execution: {str(e)}")
+            return {"error": True, "message": str(e)}
     
-    def update_test_by_key(self, test_key, cycle_id, project_id, status, comment=None):
+    def get_project_id_by_key(self, project_key):
         """
-        Find and update a test by its issue key
+        Get project ID from project key
         
         Args:
-            test_key (str): Test issue key (e.g., "TEST-123")
-            cycle_id (str): The cycle ID
-            project_id (str): The project ID
-            status (str): Status name (PASS, FAIL, etc.)
-            comment (str, optional): Comment to add
+            project_key (str): Project key (e.g., "TEST")
             
         Returns:
-            dict: Response data or error
+            str: Project ID or None
         """
-        execution = self.get_execution_for_test(test_key, cycle_id, project_id)
-        if not execution:
-            return {"error": True, "message": f"Execution not found for test {test_key}"}
+        url = f"{self.jira_url}/rest/api/2/project/{project_key}"
         
-        return self.update_test_status(execution["id"], status, comment)
+        try:
+            response = self.session.get(url, verify=self.verify_ssl)
+            
+            if response.status_code == 200:
+                return response.json().get("id")
+            else:
+                logger.error(f"Failed to get project: {response.status_code} - {response.text}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error getting project: {str(e)}")
+            return None
+    
+    def test_zephyr_endpoints(self):
+        """
+        Test various Zephyr endpoints to find working ones
+        
+        Returns:
+            dict: Results of the tests
+        """
+        endpoints = [
+            # Zephyr Squad endpoints
+            "/rest/zapi/latest/cycle",
+            "/rest/zapi/latest/execution",
+            # Alternative endpoints
+            "/rest/zephyr/latest/cycle",
+            "/rest/zephyr/1.0/cycle",
+            # Zephyr Scale endpoints (formerly TM4J)
+            "/rest/atm/1.0/testcase",
+            "/rest/atm/1.0/testrun"
+        ]
+        
+        results = {}
+        for endpoint in endpoints:
+            logger.info(f"Testing endpoint: {endpoint}")
+            
+            try:
+                response = self.session.get(
+                    f"{self.jira_url}{endpoint}",
+                    verify=self.verify_ssl,
+                    params={"projectId": "10000"}  # Add a dummy project ID
+                )
+                
+                # Consider 200-299 as success, 401/403 as auth issues, others as general errors
+                if 200 <= response.status_code < 300:
+                    status = "Accessible"
+                elif response.status_code in [401, 403]:
+                    status = "Authentication Required"
+                else:
+                    status = f"Error ({response.status_code})"
+                    
+                results[endpoint] = {
+                    "status": status,
+                    "status_code": response.status_code
+                }
+                
+                logger.info(f"Endpoint {endpoint}: {status}")
+                
+            except Exception as e:
+                logger.error(f"Error testing {endpoint}: {str(e)}")
+                results[endpoint] = {
+                    "status": "Error",
+                    "error": str(e)
+                }
+                
+        return results
+
+
+def manual_cookie_login():
+    """
+    Alternative login method using cookies from a browser session.
+    
+    This is useful when automated login keeps triggering CAPTCHA challenges.
+    Steps:
+    1. Log in to Jira in your browser
+    2. Open developer tools (F12)
+    3. Go to Network tab, find a request to Jira
+    4. Copy all cookies as a string
+    5. Use those cookies here
+    """
+    jira_url = "https://your-domain.atlassian.net"
+    
+    # Create a session
+    session = requests.Session()
+    
+    # Disable SSL verification if needed
+    verify_ssl = False
+    if not verify_ssl:
+        import urllib3
+        urllib3.disable_warnings()
+    
+    # Paste the cookies string from your browser here
+    cookies_string = "JSESSIONID=ABCDEF123456; atlassian.xsrf.token=WXYZ-7890; jira.editor.user.mode=wysiwyg"
+    
+    # Parse cookies and add to session
+    for cookie in cookies_string.split(';'):
+        if '=' in cookie:
+            name, value = cookie.strip().split('=', 1)
+            session.cookies.set(name, value)
+    
+    # Test if it works
+    try:
+        response = session.get(
+            f"{jira_url}/rest/api/2/myself",
+            verify=verify_ssl
+        )
+        
+        if response.status_code == 200:
+            user = response.json()
+            logger.info(f"Login successful! Logged in as {user.get('displayName', user.get('name'))}")
+            
+            # Now you can use this session to make API calls
+            return session
+        else:
+            logger.error(f"Cookie login failed: {response.status_code} - {response.text}")
+            return None
+    except Exception as e:
+        logger.error(f"Error in cookie login: {str(e)}")
+        return None
 
 
 def main():
     # Replace with your values
     jira_url = "https://your-domain.atlassian.net"
-    email = "your.email@example.com"
-    personal_access_token = "your-pat"
+    username = "your.email@example.com"
+    password = "your-password-or-token"  # Try with actual password first
     
-    # Create the manager with SSL verification disabled
-    zephyr = ZephyrSquadManager(jira_url, email, personal_access_token, verify_ssl=False)
+    # Create client and log in
+    client = ZephyrWithSessionAuth(jira_url, username, password, verify_ssl=False)
     
-    # Test connectivity to various endpoints
-    logger.info("Testing connectivity to Jira and Zephyr endpoints...")
-    endpoints = zephyr.test_connectivity()
-    
-    for endpoint, result in endpoints.items():
-        status = "✅ Working" if result.get("accessible") else "❌ Not Working"
-        logger.info(f"{status}: {endpoint} - Status: {result.get('status_code')}")
-    
-    # Try to use Zephyr if at least one endpoint is accessible
-    if any(result.get("accessible") for result in endpoints.values()):
-        # Example: Get project ID and work with a specific project
-        # Option 1: Use project key
+    if client.login():
+        logger.info("Login successful! Testing Zephyr endpoints...")
+        
+        # Test which Zephyr endpoints are accessible
+        results = client.test_zephyr_endpoints()
+        
+        # Get project ID from key
         project_key = "TEST"  # Replace with your project key
+        project_id = client.get_project_id_by_key(project_key)
         
-        # Option 2: Directly use project ID if you know it
-        # project_id = "10000"  # Replace with your project ID
-        
-        try:
-            # Get project info using the JIRA client
-            project = zephyr.jira.project(project_key)
-            project_id = project.id
-            logger.info(f"Found project {project.name} with ID {project_id}")
+        if project_id:
+            logger.info(f"Found project ID {project_id} for key {project_key}")
             
-            # Get test cycles for the project
-            cycles = zephyr.get_test_cycles(project_id=project_id)
+            # Get test cycles
+            cycles = client.get_cycles(project_id)
             
-            if "error" in cycles:
-                logger.error(f"Error getting cycles: {cycles}")
-            else:
-                logger.info(f"Found {len(cycles)} test cycles")
+            if "error" not in cycles and cycles:
+                # Take the first cycle
+                cycle_id = list(cycles.keys())[0]
+                cycle_name = cycles[cycle_id].get("name", "Unknown")
+                logger.info(f"Working with cycle {cycle_name} (ID: {cycle_id})")
                 
-                # Example: Work with the first cycle
-                if cycles:
-                    cycle_id = list(cycles.keys())[0]
-                    cycle_name = cycles[cycle_id].get("name", "Unknown")
-                    logger.info(f"Working with cycle: {cycle_name} (ID: {cycle_id})")
+                # Get executions
+                executions = client.get_executions(cycle_id, project_id)
+                
+                if "error" not in executions and "executions" in executions:
+                    execution_id = list(executions["executions"].keys())[0]
+                    test_key = executions["executions"][execution_id].get("issueKey", "Unknown")
                     
-                    # Example: Update a specific test
-                    test_key = "TEST-123"  # Replace with your test case key
-                    result = zephyr.update_test_by_key(
-                        test_key, 
-                        cycle_id, 
-                        project_id, 
-                        "PASS", 
-                        "Automated test passed via API"
+                    logger.info(f"Updating test {test_key} (execution ID: {execution_id})")
+                    
+                    # Update test status
+                    result = client.update_execution(
+                        execution_id,
+                        "PASS",
+                        "Automated test passed via session API"
                     )
                     
-                    if "error" in result:
-                        logger.error(f"Failed to update test: {result}")
-                    else:
+                    if "error" not in result:
                         logger.info(f"Successfully updated test {test_key} to PASS")
-                        
-        except Exception as e:
-            logger.error(f"Error processing Zephyr data: {str(e)}")
-    
+                    else:
+                        logger.error(f"Failed to update test: {result}")
+                else:
+                    logger.error("Failed to get executions")
+            else:
+                logger.error("Failed to get test cycles")
+        else:
+            logger.error(f"Could not find project ID for key {project_key}")
     else:
-        logger.error("Could not access any Zephyr endpoints. Please check your installation and permissions.")
+        logger.error("Login failed. Consider using manual cookie authentication.")
+        
+        # Uncomment to try manual cookie authentication
+        # session = manual_cookie_login()
+        # if session:
+        #     # Use the session for API calls
+        #     pass
 
 
 if __name__ == "__main__":
