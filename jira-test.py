@@ -1,47 +1,41 @@
 import requests
 import json
 import logging
-import base64
+from jira import JIRA
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-class ZephyrSquadAPI:
+class ZephyrSquadManager:
     """
-    A class to interact with Zephyr Squad API for test execution management
-    with multiple authentication methods
+    A class to manage Zephyr Squad test cases using the JIRA Python client
+    for authentication and session management
     """
 
-    def __init__(self, jira_base_url, username, personal_access_token, use_bearer_token=False):
+    def __init__(self, jira_url, email, token):
         """
-        Initialize the API wrapper
+        Initialize with Jira credentials
         
         Args:
-            jira_base_url (str): Base URL of your Jira instance (e.g., https://your-domain.atlassian.net)
-            username (str): Jira username (usually email)
-            personal_access_token (str): Jira Personal Access Token
-            use_bearer_token (bool): If True, use Bearer token auth instead of Basic Auth
+            jira_url (str): Your Jira instance URL
+            email (str): Your Jira email
+            token (str): Your Jira Personal Access Token
         """
-        self.jira_base_url = jira_base_url.rstrip('/')
-        self.username = username
-        self.token = personal_access_token
-        self.use_bearer_token = use_bearer_token
+        self.jira_url = jira_url.rstrip('/')
         
-        self.headers = {
-            "Accept": "application/json",
-            "Content-Type": "application/json"
-        }
+        # Initialize Jira client
+        logger.info("Connecting to Jira...")
+        self.jira = JIRA(
+            server=jira_url,
+            basic_auth=(email, token)
+        )
+        logger.info("Successfully connected to Jira")
         
-        # Set up authentication headers
-        if use_bearer_token:
-            self.headers["Authorization"] = f"Bearer {personal_access_token}"
-        else:
-            # Basic Auth - encoded as base64
-            auth_str = f"{username}:{personal_access_token}"
-            encoded_auth = base64.b64encode(auth_str.encode()).decode()
-            self.headers["Authorization"] = f"Basic {encoded_auth}"
+        # Store the authentication data from the Jira client
+        self.session = self.jira._session
+        self.auth_header = self.session.headers.get('Authorization')
         
-        # Status IDs in Zephyr Squad
+        # Zephyr test status IDs
         self.STATUS = {
             "PASS": 1,
             "FAIL": 2,
@@ -49,138 +43,174 @@ class ZephyrSquadAPI:
             "BLOCKED": 4,
             "UNEXECUTED": -1
         }
-        
+    
     def _make_request(self, method, endpoint, params=None, data=None):
         """
-        Helper method to make requests with proper error handling
+        Make a request to the Zephyr API using the authenticated Jira session
         
         Args:
-            method (str): HTTP method (GET, POST, PUT, etc.)
-            endpoint (str): API endpoint (without base URL)
+            method (str): HTTP method (GET, POST, PUT)
+            endpoint (str): API endpoint
             params (dict, optional): Query parameters
-            data (dict, optional): Request body data
+            data (dict, optional): Request body
             
         Returns:
-            dict: JSON response
+            dict: JSON response or error information
         """
-        url = f"{self.jira_base_url}{endpoint}"
+        url = f"{self.jira_url}{endpoint}"
+        
+        # Ensure we have the right content-type
+        headers = {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+        }
         
         try:
-            if method.upper() == "GET":
-                response = requests.get(url, headers=self.headers, params=params)
-            elif method.upper() == "POST":
-                response = requests.post(url, headers=self.headers, params=params, data=json.dumps(data) if data else None)
-            elif method.upper() == "PUT":
-                response = requests.put(url, headers=self.headers, params=params, data=json.dumps(data) if data else None)
+            if method.upper() == 'GET':
+                response = self.session.get(url, params=params, headers=headers)
+            elif method.upper() == 'POST':
+                response = self.session.post(url, params=params, data=json.dumps(data) if data else None, headers=headers)
+            elif method.upper() == 'PUT':
+                response = self.session.put(url, params=params, data=json.dumps(data) if data else None, headers=headers)
             else:
-                raise ValueError(f"Unsupported HTTP method: {method}")
-                
-            # Log request details for debugging
+                raise ValueError(f"Unsupported method: {method}")
+            
             logger.info(f"Request: {method} {url}")
-            logger.info(f"Headers: {self.headers}")
-            if params:
-                logger.info(f"Params: {params}")
+            logger.info(f"Status code: {response.status_code}")
             
-            # Print detailed error message on failure
             if response.status_code >= 400:
-                logger.error(f"Request failed with status {response.status_code}: {response.text}")
-                
-                # Special handling for auth errors
-                if response.status_code == 401:
-                    logger.error("Authentication failed. Check your credentials and token permissions.")
-                    if not self.use_bearer_token:
-                        logger.info("Try setting use_bearer_token=True if your Jira instance requires Bearer token auth.")
-                    
-                response.raise_for_status()
-                
-            return response.json()
+                logger.error(f"Error response: {response.text}")
+                return {
+                    "error": True,
+                    "status_code": response.status_code,
+                    "message": response.text
+                }
             
+            try:
+                return response.json()
+            except ValueError:
+                if not response.text:
+                    return {"success": True}
+                return {"raw_response": response.text}
+                
         except requests.exceptions.RequestException as e:
-            logger.error(f"Request error: {str(e)}")
-            raise
-        except json.JSONDecodeError:
-            logger.error("Failed to parse JSON response")
-            return {"error": "Invalid JSON response"}
+            logger.error(f"Request failed: {str(e)}")
+            return {"error": True, "message": str(e)}
     
-    def get_cycles(self, project_id):
+    def test_connectivity(self):
+        """
+        Test connectivity to various Zephyr endpoints
+        
+        Returns:
+            dict: Results of endpoint tests
+        """
+        endpoints = [
+            # Basic Jira endpoint
+            "/rest/api/2/myself",
+            # Zephyr Squad endpoints
+            "/rest/zapi/latest/cycle",
+            "/rest/zapi/latest/execution",
+            # Alternative endpoints
+            "/rest/zephyr/latest/cycle",
+            "/rest/zephyr/1.0/cycle",
+            # Classic Zephyr endpoints (for older installations)
+            "/rest/api/2/issue/createmeta?projectIds=10000&issuetypeNames=Test&expand=projects.issuetypes.fields"
+        ]
+        
+        results = {}
+        for endpoint in endpoints:
+            logger.info(f"Testing endpoint: {endpoint}")
+            try:
+                response = self.session.get(f"{self.jira_url}{endpoint}")
+                results[endpoint] = {
+                    "status_code": response.status_code,
+                    "accessible": response.status_code < 400
+                }
+                logger.info(f"Endpoint {endpoint}: Status code {response.status_code}")
+            except Exception as e:
+                results[endpoint] = {
+                    "error": str(e),
+                    "accessible": False
+                }
+                logger.error(f"Error testing {endpoint}: {str(e)}")
+                
+        return results
+    
+    def get_test_cycles(self, project_id=None, project_key=None):
         """
         Get all test cycles for a project
         
         Args:
-            project_id (str): Jira project ID
+            project_id (str, optional): Numeric project ID
+            project_key (str, optional): Project key (e.g., "TEST")
             
         Returns:
-            dict: JSON response with cycle information
+            dict: JSON response with cycles
         """
-        return self._make_request(
-            "GET", 
-            "/rest/zapi/latest/cycle", 
-            params={"projectId": project_id}
-        )
+        if not project_id and project_key:
+            # Get project ID from key
+            project = self.jira.project(project_key)
+            project_id = project.id
+            
+        return self._make_request("GET", "/rest/zapi/latest/cycle", params={"projectId": project_id})
     
-    def get_executions(self, cycle_id, project_id, version_id=None):
+    def get_executions_for_cycle(self, cycle_id, project_id):
         """
-        Get all test executions for a cycle
+        Get all test executions for a test cycle
         
         Args:
-            cycle_id (str): Test cycle ID
-            project_id (str): Jira project ID
-            version_id (str, optional): Version ID
+            cycle_id (str): The cycle ID
+            project_id (str): The project ID
             
         Returns:
-            dict: JSON response with execution information
+            dict: JSON response with executions
         """
-        params = {
-            "cycleId": cycle_id,
-            "projectId": project_id
-        }
-        
-        if version_id:
-            params["versionId"] = version_id
-            
         return self._make_request(
             "GET", 
             "/rest/zapi/latest/execution", 
-            params=params
+            params={"cycleId": cycle_id, "projectId": project_id}
         )
     
-    def get_execution_by_test_key(self, test_key, cycle_id, project_id):
+    def get_execution_for_test(self, test_key, cycle_id, project_id):
         """
-        Find a specific test execution by test case key
+        Find execution for a specific test in a cycle
         
         Args:
-            test_key (str): Test case key (e.g., TEST-123)
-            cycle_id (str): Test cycle ID
-            project_id (str): Jira project ID
+            test_key (str): Test issue key (e.g., "TEST-123")
+            cycle_id (str): The cycle ID
+            project_id (str): The project ID
             
         Returns:
-            dict: Execution information or None if not found
+            dict: Execution data or None if not found
         """
-        executions = self.get_executions(cycle_id, project_id)
+        executions = self.get_executions_for_cycle(cycle_id, project_id)
         
-        for execution_id, execution_data in executions.get("executions", {}).items():
-            if execution_data.get("issueKey") == test_key:
+        if "executions" not in executions:
+            logger.error(f"No executions found or unexpected response format: {executions}")
+            return None
+        
+        for execution_id, execution in executions["executions"].items():
+            if execution.get("issueKey") == test_key:
                 return {
                     "id": execution_id,
-                    "data": execution_data
+                    "data": execution
                 }
-                
-        logger.warning(f"No execution found for test key {test_key}")
+        
+        logger.warning(f"No execution found for test {test_key}")
         return None
     
-    def update_execution_status(self, execution_id, status, comment=None):
+    def update_test_status(self, execution_id, status, comment=None):
         """
         Update the status of a test execution
         
         Args:
-            execution_id (str): Execution ID
+            execution_id (str): The execution ID
             status (str): Status name (PASS, FAIL, etc.)
-            comment (str, optional): Comment to add to the execution
+            comment (str, optional): Comment to add
             
         Returns:
-            dict: JSON response with updated execution
+            dict: Response data
         """
-        # Get the numeric status ID from the status name
         status_id = self.STATUS.get(status.upper())
         if not status_id:
             raise ValueError(f"Invalid status: {status}. Must be one of {list(self.STATUS.keys())}")
@@ -193,142 +223,98 @@ class ZephyrSquadAPI:
             payload["comment"] = comment
             
         return self._make_request(
-            "PUT", 
-            f"/rest/zapi/latest/execution/{execution_id}/execute", 
+            "PUT",
+            f"/rest/zapi/latest/execution/{execution_id}/execute",
             data=payload
         )
     
-    def bulk_update_executions(self, execution_ids, status, comment=None):
+    def update_test_by_key(self, test_key, cycle_id, project_id, status, comment=None):
         """
-        Update multiple test executions at once
+        Find and update a test by its issue key
         
         Args:
-            execution_ids (list): List of execution IDs
+            test_key (str): Test issue key (e.g., "TEST-123")
+            cycle_id (str): The cycle ID
+            project_id (str): The project ID
             status (str): Status name (PASS, FAIL, etc.)
-            comment (str, optional): Comment to add to all executions
+            comment (str, optional): Comment to add
             
         Returns:
-            dict: JSON response with update results
+            dict: Response data or error
         """
-        # Get the numeric status ID from the status name
-        status_id = self.STATUS.get(status.upper())
-        if not status_id:
-            raise ValueError(f"Invalid status: {status}. Must be one of {list(self.STATUS.keys())}")
+        execution = self.get_execution_for_test(test_key, cycle_id, project_id)
+        if not execution:
+            return {"error": True, "message": f"Execution not found for test {test_key}"}
         
-        payload = {
-            "executions": execution_ids,
-            "status": status_id
-        }
-        
-        if comment:
-            payload["comment"] = comment
-            
-        return self._make_request(
-            "PUT", 
-            "/rest/zapi/latest/execution/execute/bulk",
-            data=payload
-        )
-
-    # Try alternative API endpoints if the main ones don't work
-    def try_alternative_endpoints(self):
-        """
-        Test various API endpoints to determine which ones are accessible
-        Returns a list of working endpoints
-        """
-        endpoints = [
-            # Standard Zephyr Squad endpoints
-            "/rest/zapi/latest/cycle",
-            "/rest/zapi/latest/execution",
-            # Alternative endpoints that might be used in different versions
-            "/rest/zephyr/latest/cycle",
-            "/rest/zephyr/1.0/cycle",
-            "/rest/api/2/project"  # This is a standard Jira endpoint to test basic connectivity
-        ]
-        
-        working_endpoints = []
-        for endpoint in endpoints:
-            try:
-                logger.info(f"Testing endpoint: {endpoint}")
-                response = requests.get(
-                    f"{self.jira_base_url}{endpoint}", 
-                    headers=self.headers
-                )
-                
-                if response.status_code < 400:
-                    working_endpoints.append({
-                        "endpoint": endpoint,
-                        "status": response.status_code,
-                        "works": True
-                    })
-                    logger.info(f"Endpoint {endpoint} is accessible: {response.status_code}")
-                else:
-                    working_endpoints.append({
-                        "endpoint": endpoint,
-                        "status": response.status_code,
-                        "works": False
-                    })
-                    logger.info(f"Endpoint {endpoint} returned status code: {response.status_code}")
-                    
-            except requests.exceptions.RequestException as e:
-                logger.error(f"Failed to access {endpoint}: {str(e)}")
-                working_endpoints.append({
-                    "endpoint": endpoint,
-                    "status": "Error",
-                    "works": False,
-                    "error": str(e)
-                })
-                
-        return working_endpoints
+        return self.update_test_status(execution["id"], status, comment)
 
 
-# Example usage with better error handling
 def main():
-    # Replace these with your actual values
+    # Replace with your values
     jira_url = "https://your-domain.atlassian.net"
-    username = "your.email@example.com"
-    personal_access_token = "your-personal-access-token"
-    project_id = "10001"  # Get this from your Jira project
+    email = "your.email@example.com"
+    personal_access_token = "your-pat"
     
-    # Try both authentication methods
-    for auth_method in [False, True]:
-        logger.info(f"Trying {'Bearer Token' if auth_method else 'Basic Auth'} authentication")
+    # Create the manager
+    zephyr = ZephyrSquadManager(jira_url, email, personal_access_token)
+    
+    # Test connectivity to various endpoints
+    logger.info("Testing connectivity to Jira and Zephyr endpoints...")
+    endpoints = zephyr.test_connectivity()
+    
+    for endpoint, result in endpoints.items():
+        status = "✅ Working" if result.get("accessible") else "❌ Not Working"
+        logger.info(f"{status}: {endpoint} - Status: {result.get('status_code')}")
+    
+    # Try to use Zephyr if at least one endpoint is accessible
+    if any(result.get("accessible") for result in endpoints.values()):
+        # Example: Get project ID and work with a specific project
+        # Option 1: Use project key
+        project_key = "TEST"  # Replace with your project key
+        
+        # Option 2: Directly use project ID if you know it
+        # project_id = "10000"  # Replace with your project ID
         
         try:
-            # Initialize API client
-            zephyr = ZephyrSquadAPI(
-                jira_url, 
-                username, 
-                personal_access_token, 
-                use_bearer_token=auth_method
-            )
+            # Get project info using the JIRA client
+            project = zephyr.jira.project(project_key)
+            project_id = project.id
+            logger.info(f"Found project {project.name} with ID {project_id}")
             
-            # First test which endpoints are accessible
-            working_endpoints = zephyr.try_alternative_endpoints()
+            # Get test cycles for the project
+            cycles = zephyr.get_test_cycles(project_id=project_id)
             
-            # Display results
-            logger.info("API Endpoint Test Results:")
-            for endpoint in working_endpoints:
-                status = "✅ Working" if endpoint["works"] else "❌ Not Working"
-                logger.info(f"{status}: {endpoint['endpoint']} - Status: {endpoint['status']}")
+            if "error" in cycles:
+                logger.error(f"Error getting cycles: {cycles}")
+            else:
+                logger.info(f"Found {len(cycles)} test cycles")
                 
-            # If we got here without errors, basic connectivity is working
-            logger.info(f"Successfully connected using {'Bearer Token' if auth_method else 'Basic Auth'}")
-            
-            # Try to get cycles if the endpoint is working
-            if any(e["endpoint"] == "/rest/zapi/latest/cycle" and e["works"] for e in working_endpoints):
-                logger.info("Attempting to get test cycles...")
-                cycles = zephyr.get_cycles(project_id)
-                logger.info(f"Found {len(cycles) if isinstance(cycles, dict) else 0} cycles")
-                
-                # Continue with the main functionality...
-                # (rest of the code from previous example)
-                
-            break  # Exit the loop if we've successfully connected
-            
+                # Example: Work with the first cycle
+                if cycles:
+                    cycle_id = list(cycles.keys())[0]
+                    cycle_name = cycles[cycle_id].get("name", "Unknown")
+                    logger.info(f"Working with cycle: {cycle_name} (ID: {cycle_id})")
+                    
+                    # Example: Update a specific test
+                    test_key = "TEST-123"  # Replace with your test case key
+                    result = zephyr.update_test_by_key(
+                        test_key, 
+                        cycle_id, 
+                        project_id, 
+                        "PASS", 
+                        "Automated test passed via API"
+                    )
+                    
+                    if "error" in result:
+                        logger.error(f"Failed to update test: {result}")
+                    else:
+                        logger.info(f"Successfully updated test {test_key} to PASS")
+                        
         except Exception as e:
-            logger.error(f"Error with authentication method {'Bearer Token' if auth_method else 'Basic Auth'}: {str(e)}")
-            if auth_method:  # If we've already tried both methods
-                logger.error("Both authentication methods failed. Please check your credentials and Jira setup.")
+            logger.error(f"Error processing Zephyr data: {str(e)}")
+    
+    else:
+        logger.error("Could not access any Zephyr endpoints. Please check your installation and permissions.")
 
 
 if __name__ == "__main__":
