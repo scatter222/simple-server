@@ -12,7 +12,7 @@ class ZephyrSquadManager:
     for authentication and session management
     """
 
-    def __init__(self, jira_url, email, token):
+    def __init__(self, jira_url, email, token, verify_ssl=False):
         """
         Initialize with Jira credentials
         
@@ -20,14 +20,23 @@ class ZephyrSquadManager:
             jira_url (str): Your Jira instance URL
             email (str): Your Jira email
             token (str): Your Jira Personal Access Token
+            verify_ssl (bool): Whether to verify SSL certificates (default: False)
         """
         self.jira_url = jira_url.rstrip('/')
+        self.verify_ssl = verify_ssl
+        
+        # Disable SSL warnings if we're not verifying
+        if not verify_ssl:
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            logger.warning("SSL certificate verification is disabled. This is insecure!")
         
         # Initialize Jira client
         logger.info("Connecting to Jira...")
         self.jira = JIRA(
             server=jira_url,
-            basic_auth=(email, token)
+            basic_auth=(email, token),
+            options={'verify': verify_ssl}
         )
         logger.info("Successfully connected to Jira")
         
@@ -67,11 +76,11 @@ class ZephyrSquadManager:
         
         try:
             if method.upper() == 'GET':
-                response = self.session.get(url, params=params, headers=headers)
+                response = self.session.get(url, params=params, headers=headers, verify=self.verify_ssl)
             elif method.upper() == 'POST':
-                response = self.session.post(url, params=params, data=json.dumps(data) if data else None, headers=headers)
+                response = self.session.post(url, params=params, data=json.dumps(data) if data else None, headers=headers, verify=self.verify_ssl)
             elif method.upper() == 'PUT':
-                response = self.session.put(url, params=params, data=json.dumps(data) if data else None, headers=headers)
+                response = self.session.put(url, params=params, data=json.dumps(data) if data else None, headers=headers, verify=self.verify_ssl)
             else:
                 raise ValueError(f"Unsupported method: {method}")
             
@@ -121,7 +130,7 @@ class ZephyrSquadManager:
         for endpoint in endpoints:
             logger.info(f"Testing endpoint: {endpoint}")
             try:
-                response = self.session.get(f"{self.jira_url}{endpoint}")
+                response = self.session.get(f"{self.jira_url}{endpoint}", verify=self.verify_ssl)
                 results[endpoint] = {
                     "status_code": response.status_code,
                     "accessible": response.status_code < 400
@@ -255,8 +264,8 @@ def main():
     email = "your.email@example.com"
     personal_access_token = "your-pat"
     
-    # Create the manager
-    zephyr = ZephyrSquadManager(jira_url, email, personal_access_token)
+    # Create the manager with SSL verification disabled
+    zephyr = ZephyrSquadManager(jira_url, email, personal_access_token, verify_ssl=False)
     
     # Test connectivity to various endpoints
     logger.info("Testing connectivity to Jira and Zephyr endpoints...")
